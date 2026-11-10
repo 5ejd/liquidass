@@ -81,10 +81,15 @@ jobs:
         run: |
           brew install ldid make
           echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH
-          # AltList headers are required by LiquidAssPrefs but are not part of Theos.
+          # AltList is a build/runtime dependency of LiquidAssPrefs.
           git clone --depth 1 https://github.com/opa334/AltList.git /tmp/altlist
-          mkdir -p "$THEOS/include/AltList"
-          cp /tmp/altlist/*.h "$THEOS/include/AltList/"
+          cd /tmp/altlist
+          bash install_to_theos.sh
+          # Make the framework available to every scheme, including roothide.
+          for d in "$THEOS/lib" "$THEOS/lib/iphone/rootless" "$THEOS/lib/iphone/roothide"; do
+            mkdir -p "$d"
+            cp -R "$THEOS/lib/AltList.framework" "$d/" 2>/dev/null || true
+          done
 
       - name: build (${{ matrix.scheme }})
         run: |
