@@ -69,7 +69,7 @@ jobs:
         if: steps.cache-sdks.outputs.cache-hit != 'true'
         run: |
           curl -LO https://github.com/theos/sdks/archive/master.zip
-          unzip -q master.zip
+          bsdtar -xf master.zip
           mkdir -p theos/sdks
           mv sdks-master/*.sdk theos/sdks/
           rm -rf master.zip sdks-master
