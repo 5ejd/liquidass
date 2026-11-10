@@ -894,6 +894,19 @@ static void LGAnimateTabBarScale(UITabBar *bar, BOOL pressed) {
         objc_getAssociatedObject(bar, kLGTabBarScaleAnimatorKey);
     if (existing && existing.isRunning) {
         [existing stopAnimation:YES];
+        // Interrupted animations never reach their completion handler, so
+        // reset any transforms they left behind to avoid stale (non-identity)
+        // transforms that would permanently block tab button layout updates.
+        glass.transform = CGAffineTransformIdentity;
+        UIView *vibranceReset = objc_getAssociatedObject(bar, kLGTabBarVibranceKey);
+        if (vibranceReset) vibranceReset.transform = CGAffineTransformIdentity;
+        for (UIView *btn in LGStockTabBarButtons(bar)) btn.transform = CGAffineTransformIdentity;
+        UIView *highlightReset = objc_getAssociatedObject(bar, kLGTabBarSelectedHighlightKey);
+        if (highlightReset) highlightReset.transform = CGAffineTransformIdentity;
+        LGLiveBackdropView *lensReset = objc_getAssociatedObject(bar, kLGTabBarSelectionGlassKey);
+        if (lensReset) lensReset.transform = CGAffineTransformIdentity;
+        UIView *blueOverlayReset = LGTabBarBlueOverlay(bar, NO);
+        if (blueOverlayReset) blueOverlayReset.transform = CGAffineTransformIdentity;
     }
 
     CGFloat targetScale = pressed ? 1.035 : 1.0;
@@ -1198,23 +1211,56 @@ static BOOL LGTabBarRemapButtonFrame(UIView *button, CGRect *frame) {
 
     NSValue *previous = objc_getAssociatedObject(button, kLGTabBarRemapOutKey);
     if (previous && CGRectEqualToRect(previous.CGRectValue, *frame)) return NO;
-    objc_setAssociatedObject(button, kLGTabBarOriginalButtonFrameKey,
-                             [NSValue valueWithCGRect:*frame],
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    // Only cache frames that look like real (unmapped) tab bar button
+    // layouts. An incoming frame that is substantially narrower than the
+    // cached one is almost certainly an already-remapped frame and must not
+    // overwrite the original, otherwise buttons collapse together.
+    NSValue *existingOriginal = objc_getAssociatedObject(
+        button, kLGTabBarOriginalButtonFrameKey);
+    BOOL shouldStoreOriginal = (CGRectGetWidth(*frame) > 0.0 &&
+                                CGRectGetWidth(*frame) <= barWidth + 1.0);
+    if (shouldStoreOriginal && existingOriginal) {
+        CGFloat existingWidth = CGRectGetWidth(existingOriginal.CGRectValue);
+        CGFloat incomingWidth = CGRectGetWidth(*frame);
+        if (existingWidth > 1.0 && incomingWidth < existingWidth * 0.9)
+            shouldStoreOriginal = NO;
+    }
+    if (shouldStoreOriginal) {
+        objc_setAssociatedObject(button, kLGTabBarOriginalButtonFrameKey,
+                                 [NSValue valueWithCGRect:*frame],
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
 
     CGRect pill = CGRectInset(LGTabBarPillFrame(bar), 4.0, 0.0);
     if (CGRectIsEmpty(pill)) return NO;
     CGRect source = CGRectNull;
     for (UIView *tabButton in LGStockTabBarButtons(bar)) {
+        if (tabButton.hidden || tabButton.alpha < 0.01) continue;
         NSValue *value = objc_getAssociatedObject(
             tabButton, kLGTabBarOriginalButtonFrameKey);
         if (!value) continue;
-        source = CGRectIsNull(source) ? value.CGRectValue
-                                     : CGRectUnion(source, value.CGRectValue);
+        CGRect candidate = value.CGRectValue;
+        if (CGRectGetWidth(candidate) < 1.0) continue;
+        if (CGRectGetWidth(candidate) > barWidth + 1.0) continue;
+        // Clamp to the bar bounds: stray frames outside the bar (from
+        // custom/hidden layouts) must not inflate the source span, which
+        // would collapse all buttons together.
+        if (CGRectGetMinX(candidate) < 0.0) {
+            candidate.size.width += CGRectGetMinX(candidate);
+            candidate.origin.x = 0.0;
+        }
+        if (CGRectGetMaxX(candidate) > barWidth)
+            candidate.size.width = barWidth - CGRectGetMinX(candidate);
+        if (CGRectGetWidth(candidate) < 1.0) continue;
+        source = CGRectIsNull(source) ? candidate
+                                     : CGRectUnion(source, candidate);
     }
-    if (CGRectIsNull(source) || CGRectGetWidth(source) < 1.0)
+    if (CGRectIsNull(source) || CGRectGetWidth(source) < 1.0 ||
+        CGRectGetWidth(source) > barWidth + 1.0)
         source = CGRectMake(0.0, 0.0, barWidth, CGRectGetHeight(*frame));
     CGFloat scale = CGRectGetWidth(pill) / CGRectGetWidth(source);
+    if (scale < 0.5 || scale > 2.0) scale = 1.0;
 
     CGRect mapped = *frame;
     mapped.origin.x = CGRectGetMinX(pill) +
@@ -2019,8 +2065,18 @@ static void LGHookTabBarHostControllers(void) {
 %hook UITabBarButton
 
 - (void)setFrame:(CGRect)frame {
+    UITabBar *bar = LGTabBarForButton(self);
+    UIViewPropertyAnimator *scaleAnim = bar
+        ? objc_getAssociatedObject(bar, kLGTabBarScaleAnimatorKey) : nil;
+    BOOL animating = scaleAnim && scaleAnim.isRunning;
     if (!CGAffineTransformIsIdentity(self.transform)) {
-        return;
+        if (!animating) {
+            // Drop a stale non-identity transform left by an interrupted
+            // animation so layout updates are not permanently ignored.
+            self.transform = CGAffineTransformIdentity;
+        } else {
+            return;
+        }
     }
     CGRect mapped = frame;
     %orig(LGTabBarRemapButtonFrame(self, &mapped) ? mapped : frame);
